@@ -1,0 +1,69 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Lambda resources
+
+Resources:
+  # Layers
+  ServiceWrappersLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      Content: ../../lambdas/layers/service_wrappers
+      Description: Service wrappers for boto3 SDK
+      LayerName: service_wrappers
+      CompatibleRuntimes:
+        - python3.9
+  WorkshopExceptionsLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      Content: ../../lambdas/layers/workshop_exceptions
+      Description: Custom exceptions used for source within unit-testing-workshop solution
+      LayerName: workshop_exceptions
+      CompatibleRuntimes:
+        - python3.9
+  # Functions
+  VotesProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: VotesProcessorRole
+      Description: Role for Lambda execution tied to processing items within Votes DynamoDB table
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: VotesProcessorPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogevents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/UnitTestingWorkshopVotesProcessor:*
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !ImportValue VotesTableArn
+  VotesProcessorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: UnitTestingWorkshopVotesProcessor
+      Handler: main.handler
+      Runtime: python3.9
+      Code: ../../lambdas/src/VoteProcessor/
+      MemorySize: 128
+      Timeout: 3
+      Environment:
+        Variables:
+          VALID_VOTE_TYPES: ALL,YES,NO,MAYBE
+          VOTES_TABLE_NAME: !ImportValue VotesTableName
+          VOTES_TABLE_PARTITION_KEY: Id
+      Role: !GetAtt VotesProcessorRole.Arn

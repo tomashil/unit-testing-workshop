@@ -1,0 +1,538 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Stack for static resources in unit testing workshop environment
+
+Resources:
+  # KMS
+  KMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Symmetric key used with unit testing workshop environment
+      Enabled: true
+      EnableKeyRotation: false
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: unit-testing-workshop-kms-key-policy
+        Statement:
+          - Sid: Prevent loss of key control and allow administration within unit testing workshop context
+            Effect: Allow
+            Principal:
+                AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+                - kms:*
+            Resource: '*'
+          - Sid: Allow use of the key through S3, CloudFormation, CodeBuild, and CodePipeline
+            Effect: Allow
+            Principal:
+              AWS: '*'
+            Action:
+              - kms:Decrypt
+              - kms:DeleteAlias
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey
+              - kms:GenerateDataKeyWithoutPlaintext
+              - kms:ReEncrypt*
+              - kms:ScheduleKeyDeletion
+            Resource: '*'
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Sub ${AWS::AccountId}
+                kms:ViaService:
+                  - !Sub s3.${AWS::Region}.amazonaws.com
+                  - !Sub cloudformation.${AWS::Region}.amazonaws.com
+                  - !Sub codebuild.${AWS::Region}.amazonaws.com
+                  - !Sub codepipeline.${AWS::Region}.amazonaws.com
+      KeySpec: SYMMETRIC_DEFAULT
+      KeyUsage: ENCRYPT_DECRYPT
+      PendingWindowInDays: 7
+  KMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/unit-testing-workshop-key
+      TargetKeyId: !Ref KMSKey
+  # DynamoDB
+  VotesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: UnitTestingWorkshop_Votes
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      KeySchema:
+        - AttributeName: Id
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: Id
+          AttributeType: S
+  # S3
+  CodePipelineArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub unit-testing-workshop-codepipeline-artifacts-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KMSKey
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+  CloudFormationTemplateBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub unit-testing-workshop-cloudformation-templates-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref KMSKey
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+  # CodeStar
+  CodeStarConnection:
+    Type: AWS::CodeStarConnections::Connection
+    Properties:
+      ConnectionName: unit-testing-workshop-connection
+      ProviderType: GitHub
+  # CodeBuild
+  TestServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: unit-testing-workshop-test-service-role
+      Description: Role for CodeBuild test execution tied to unit testing workshop
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: TestPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/unit-testing-workshop
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/unit-testing-workshop*
+              - Effect: Allow
+                Action:
+                  - codebuild:CreateReportGroup
+                  - codebuild:CreateReport
+                  - codebuild:UpdateReport
+                  - codebuild:BatchPutTestCases
+                  - codebuild:BatchPutCodeCoverages
+                Resource:
+                  - !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/unit-testing-workshop*
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  - !Sub arn:aws:s3:::${CodePipelineArtifactBucket}
+                  - !Sub arn:aws:s3:::${CodePipelineArtifactBucket}/*
+  TestProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: unit-testing-workshop-test-project
+      Description: CodeBuild project used for testing workshop source code
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        ImagePullCredentialsType: CODEBUILD
+        Type: LINUX_CONTAINER
+      ServiceRole: !GetAtt TestServiceRole.Arn
+      Source:
+        BuildSpec: buildspecs/testbuildspec.yml
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 10
+  BuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: unit-testing-workshop-build-service-role
+      Description: Role for CodeBuild execution tied to unit testing workshop
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BuildPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/unit-testing-workshop
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/unit-testing-workshop*
+              - Effect: Allow
+                Action:
+                  - codebuild:CreateReportGroup
+                  - codebuild:CreateReport
+                  - codebuild:UpdateReport
+                  - codebuild:BatchPutTestCases
+                  - codebuild:BatchPutCodeCoverages
+                Resource:
+                  - !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/unit-testing-workshop*
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  - !Sub arn:aws:s3:::${CodePipelineArtifactBucket}
+                  - !Sub arn:aws:s3:::${CodePipelineArtifactBucket}/*
+                  - !Sub arn:aws:s3:::${CloudFormationTemplateBucket}
+                  - !Sub arn:aws:s3:::${CloudFormationTemplateBucket}/*
+              - Effect: Allow
+                Action:
+                  - cloudformation:ListExports
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - kms:DescribeKey
+                Resource:
+                  - !GetAtt KMSKey.Arn
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: unit-testing-workshop-build-project
+      Description: CodeBuild project used for building workshop source code.
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        ImagePullCredentialsType: CODEBUILD
+        Type: LINUX_CONTAINER
+      ServiceRole: !GetAtt BuildServiceRole.Arn
+      Source:
+        BuildSpec: buildspecs/buildspec.yml
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 10
+  # CodePipeline
+  PipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: unit-testing-workshop-codepipeline-service-role
+      Description: Role for CodePipeline execution tied to CI/CD processes for unit testing workshop
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - cloudformation.amazonaws.com
+                - codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PipelinePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - codestar-connections:UseConnection
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:UpdateStack
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - iam:CreatePolicy
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:DeleteRolePolicy
+                  - iam:GetRole
+                  - iam:GetRolePolicy
+                  - iam:PassRole
+                  - iam:PutRolePolicy
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - lambda:CreateFunction
+                  - lambda:DeleteFunction
+                  - lambda:DeleteLayerVersion
+                  - lambda:GetFunction
+                  - lambda:PublishLayerVersion
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                Resource: '*'
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Type: S3
+        Location: !Ref CodePipelineArtifactBucket
+        EncryptionKey:
+          Id: !Ref KMSKey
+          Type: KMS
+      Name: unit-testing-workshop-codepipeline
+      RoleArn: !GetAtt PipelineServiceRole.Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - RunOrder: 1
+              Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: 1
+              Configuration:
+                ConnectionArn: !Ref CodeStarConnection
+                FullRepositoryId: tomashil/unit-testing-workshop
+                BranchName: main
+              OutputArtifacts:
+                - Name: SourceArtifact
+        - Name: Test
+          Actions:
+            - RunOrder: 1
+              Name: TestAction
+              ActionTypeId:
+                Category: Test
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref TestProject
+              InputArtifacts:
+                - Name: SourceArtifact
+        - Name: Build
+          Actions:
+            - RunOrder: 1
+              Name: BuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName: !Ref BuildProject
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+        - Name: Deploy
+          Actions:
+            - RunOrder: 1
+              Name: DeployAction
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: unit-testing-workshop-source-stack
+                Capabilities: CAPABILITY_NAMED_IAM
+                RoleArn: !GetAtt PipelineServiceRole.Arn
+                TemplatePath: BuildArtifact::output_template.yml
+              InputArtifacts:
+                - Name: BuildArtifact
+  # Custom
+  StackHelperRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: LambdaStackHelperRole
+      Description: Role used for access to DynamoDB and S3 resources created by unit testing workshop stack
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: StackHelperPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogevents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/UnitTestingWorkshopStackHelper:*
+              - Effect: Allow
+                Action: dynamodb:BatchWriteItem
+                Resource:
+                  - !GetAtt VotesTable.Arn
+              - Effect: Allow
+                Action:
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${CodePipelineArtifactBucket}
+                  - !Sub arn:aws:s3:::${CodePipelineArtifactBucket}/*
+                  - !Sub arn:aws:s3:::${CloudFormationTemplateBucket}
+                  - !Sub arn:aws:s3:::${CloudFormationTemplateBucket}/*
+  StackHelperLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: UnitTestingWorkshopStackHelper
+      Description: Lambda function used for creation and deletion of resources during CloudFormation execution tied to unit testing workshop
+      Role: !GetAtt StackHelperRole.Arn
+      MemorySize: 512
+      Timeout: 60
+      Runtime: python3.9
+      Handler: index.handler
+      Code:
+        ZipFile: |
+          import json
+          import urllib3
+
+          import boto3
+
+          dynamo_client = boto3.client('dynamodb')
+          s3_resource = boto3.resource('s3')
+          http_pool_manager = urllib3.PoolManager()
+
+          def handler(event, context):
+              """Lambda entry point.  Provides initialization/tear-down services outisde of CloudFormation capabilities.
+              
+              Args:
+                  event: invoking service information
+                  context: runtime information
+              """
+              if event['RequestType'] == 'Create':
+                  initialize_dynamo(event['ResourceProperties']['VotesTableName'])
+              elif event['RequestType'] == 'Delete':
+                  clean_s3(event['ResourceProperties']['CodePipelineArtifactBucketName'])
+                  clean_s3(event['ResourceProperties']['CloudFormationTemplateBucketName'])
+              
+              response_body = {
+                  'Status': 'SUCCESS',
+                  'PhysicalResourceId': context.log_group_name,
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId']
+              }
+
+              http_pool_manager.request('PUT', event['ResponseURL'], body=json.dumps(response_body))
+
+          def initialize_dynamo(table_name):
+              """Fills DynamoDB with mock data.
+              
+              Args:
+                  table_name: name of table to fill
+              """
+              dynamo_client.batch_write_item(
+                  RequestItems = {
+                      table_name: [
+                          {
+                              'PutRequest': {
+                                  'Item': {
+                                      'Id': {
+                                          'S': 'YES'
+                                      },
+                                      'Count': {
+                                          'N': '63'
+                                      }
+                                  }
+                              }
+                          },
+                          {
+                              'PutRequest': {
+                                  'Item': {
+                                      'Id': {
+                                          'S': 'NO'
+                                      },
+                                      'Count': {
+                                          'N': '18'
+                                      }
+                                  }
+                              }
+                          },
+                          {
+                              'PutRequest': {
+                                  'Item': {
+                                      'Id': {
+                                          'S': 'MAYBE'
+                                      },
+                                      'Count': {
+                                          'N': '41'
+                                      }
+                                  }
+                              }
+                          }
+                      ]
+                  }
+              )
+
+          def clean_s3(bucket_name):
+              """Deletes objects within S3 bucket.
+              
+              Args:
+                  bucket_name: name of bucket to clean
+              """
+              s3_bucket = s3_resource.Bucket(bucket_name)
+              for obj in s3_bucket.objects.all():
+                  s3_resource.Object(s3_bucket.name, obj.key).delete()
+  StackHelper:
+    Type: Custom::StackHelper
+    Properties:
+      ServiceToken: !GetAtt StackHelperLambda.Arn
+      CodePipelineArtifactBucketName: !Ref  CodePipelineArtifactBucket
+      CloudFormationTemplateBucketName: !Ref CloudFormationTemplateBucket
+      VotesTableName: !Ref VotesTable
+
+Outputs:
+  CloudFormationTemplateBucketName:
+    Description: Name of S3 bucket used for CloudFormation package operations in unit testing workshop environment
+    Value: !Ref CloudFormationTemplateBucket
+    Export:
+      Name: CloudFormationTemplateBucketName
+  SourceStackName:
+    Description: Name to be used for stack that will create variable resources
+    Value: unit-testing-workshop-source-stack
+    Export:
+      Name: SourceStackName
+  TableArn:
+    Description: Arn of DynamoDB table used in unit testing workshop environment
+    Value: !GetAtt VotesTable.Arn
+    Export:
+      Name: VotesTableArn
+  TableName:
+    Description: Name of DynamoDB table used in unit testing workshop environment
+    Value: !Ref VotesTable
+    Export:
+      Name: VotesTableName

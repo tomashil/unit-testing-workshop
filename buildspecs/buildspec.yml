@@ -1,0 +1,12 @@
+version: 0.2
+env:
+  shell: bash
+phases:
+  build:
+    commands:
+      - bucket_name=$(aws cloudformation list-exports --query 'Exports[?Name==`CloudFormationTemplateBucketName`].Value | [0]' --output text)
+      - key_id=$(aws kms describe-key --key-id alias/unit-testing-workshop-key --query 'KeyMetadata.KeyId' --output text)
+      - aws cloudformation package --template-file cfn/variable/source.yml --s3-bucket ${bucket_name} --kms-key-id ${key_id} --output-template-file output_template.yml
+artifacts:
+  files:
+    - output_template.yml
