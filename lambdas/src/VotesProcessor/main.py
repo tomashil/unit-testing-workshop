@@ -1,4 +1,3 @@
-# Temporary comment to test CodePipeline functionality
 import logging
 import os
 import sys

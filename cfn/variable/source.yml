@@ -58,7 +58,7 @@ Resources:
       FunctionName: UnitTestingWorkshopVotesProcessor
       Handler: main.handler
       Runtime: python3.9
-      Code: ../../lambdas/src/VoteProcessor/
+      Code: ../../lambdas/src/VotesProcessor/
       MemorySize: 128
       Timeout: 3
       Environment:
